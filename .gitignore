@@ -1,0 +1,22 @@
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# Model weights and checkpoints
+checkpoints/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS/editor noise
+.DS_Store
+
+# Local inference outputs
+depth_vis/
+video_depth_vis/
+output/
+outputs/

@@ -80,6 +80,285 @@ raw_img = cv2.imread('your/image/path')
 depth = model.infer_image(raw_img) # HxW raw depth map in numpy
 ```
 
+### 启动 HTTP 服务并上传结果到阿里云 OSS
+
+本项目额外提供了一个 FastAPI 服务，用于通过 HTTP 接口生成深度图、视频截图和视频最后 5 秒片段，并将结果上传到阿里云 OSS。
+
+安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+将 Small 模型 checkpoint 放到：
+
+```text
+checkpoints/depth_anything_v2_vits.pth
+```
+
+在 `.env` 中配置 OSS 和模型参数：
+
+```env
+OSS_ACCESS_KEY_ID=your-access-key-id
+OSS_ACCESS_KEY_SECRET=your-access-key-secret
+OSS_REGION=cn-hangzhou
+OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
+OSS_BUCKET=your-bucket
+OSS_PUBLIC_BASE_URL=https://your-public-domain.example.com
+DEPTH_ENCODER=vits
+DEPTH_CHECKPOINT=checkpoints/depth_anything_v2_vits.pth
+```
+
+服务启动时会自动读取 `.env`。代码也兼容旧的 `ALIYUN_OSS_*` 环境变量名。
+
+本地运行服务时，请使用公网 OSS Endpoint，例如 `https://oss-cn-beijing.aliyuncs.com`。不要使用 `oss-cn-beijing-internal.aliyuncs.com` 这类阿里云内网 Endpoint，除非服务运行在同地域同 VPC 的阿里云内网环境中。
+
+启动服务：
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+#### 统一返回格式
+
+所有业务接口都使用相同的返回结构。
+
+成功返回：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "success",
+  "data": {}
+}
+```
+
+失败返回：
+
+```json
+{
+  "success": false,
+  "code": "BAD_REQUEST",
+  "message": "错误描述",
+  "data": null
+}
+```
+
+参数校验失败时，`data.errors` 会包含字段级错误信息。
+
+#### 接口一：生成深度图
+
+根据图片 URL 生成深度图，并上传到 OSS。
+
+请求地址：
+
+```text
+POST /depth
+```
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/depth \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "image_url": "https://example.com/input.jpg",
+    "oss_key": "depth/input-depth.png"
+  }'
+```
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "image_url": "https://example.com/input.jpg",
+    "oss_key": "depth/input-depth.png",
+    "depth_url": "https://your-public-domain.example.com/depth/input-depth.png"
+  }
+}
+```
+
+失败响应示例：
+
+```json
+{
+  "success": false,
+  "code": "BAD_REQUEST",
+  "message": "image_url must use http or https",
+  "data": null
+}
+```
+
+请求字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|:-|:-|:-:|:-|
+| `image_url` | string | 是 | 原始图片 URL，必须是 `http` 或 `https` |
+| `oss_key` | string | 否 | 深度图保存到 OSS 的 object key；不传时自动保存到 `depth/<uuid>.png` |
+
+#### 接口二：视频截图
+
+根据 OSS 视频 URL 和毫秒时间戳生成截图，并上传到 OSS。
+
+本接口会先下载视频，再使用项目依赖 `imageio-ffmpeg` 提供的 FFmpeg 截图，最后上传 JPG 到 OSS；不依赖 MTS，也不需要系统安装 FFmpeg。
+
+请求地址：
+
+```text
+POST /video/snapshot
+```
+
+视频接口额外支持以下 `.env` 配置：
+
+```env
+OSS_VIDEO_SNAPSHOT_PREFIX=video-snapshots
+OSS_VIDEO_CLIP_PREFIX=video-clips
+OSS_VIDEO_POLL_INTERVAL_SECONDS=2
+OSS_VIDEO_POLL_TIMEOUT_SECONDS=120
+OSS_VIDEO_MAX_BYTES=209715200
+```
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/video/snapshot \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "video_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "timestamp_ms": 1200,
+    "wait": true
+  }'
+```
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "status": "success",
+    "video_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "snapshot_url": "https://your-public-domain.example.com/video-snapshots/<uuid>.jpg",
+    "snapshot_key": "video-snapshots/<uuid>.jpg",
+    "timestamp_ms": 1200
+  }
+}
+```
+
+失败响应示例：
+
+```json
+{
+  "success": false,
+  "code": "BAD_REQUEST",
+  "message": "video_url must point to the current OSS bucket",
+  "data": null
+}
+```
+
+请求字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|:-|:-|:-:|:-|
+| `video_url` | string | 是 | OSS 视频可访问 URL，必须指向当前配置的 OSS Bucket 或 `OSS_PUBLIC_BASE_URL` |
+| `timestamp_ms` | integer | 是 | 截图时间点，单位毫秒 |
+| `wait` | boolean | 否 | 兼容字段；当前本地处理流程为同步执行 |
+
+#### 接口三：截取视频最后 5 秒
+
+根据 OSS 视频 URL 截取最后 5 秒视频，并上传到 OSS。
+
+处理流程：
+
+1. 下载视频到临时目录。
+2. 使用项目依赖 `imageio-ffmpeg` 提供的 FFmpeg 读取视频总时长。
+3. 如果视频时长小于等于 5 秒，直接返回原始视频 URL。
+4. 如果视频时长大于 5 秒，截取最后 5 秒并上传到 OSS。
+
+请求地址：
+
+```text
+POST /video/tail-clip
+```
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/video/tail-clip \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "video_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "wait": true
+  }'
+```
+
+视频时长大于 5 秒时，响应示例：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "status": "success",
+    "duration_ms": 8750,
+    "video_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "clip_url": "https://your-public-domain.example.com/video-clips/<uuid>.mp4",
+    "clip_key": "video-clips/<uuid>.mp4",
+    "is_original": false,
+    "reason": null
+  }
+}
+```
+
+视频时长小于等于 5 秒时，响应示例：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "status": "skipped",
+    "duration_ms": 5000,
+    "video_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "clip_url": "https://your-public-domain.example.com/videos/input.mp4",
+    "clip_key": "videos/input.mp4",
+    "is_original": true,
+    "reason": "duration_not_more_than_5s"
+  }
+}
+```
+
+说明：无论视频是否超过 5 秒，前端都可以统一读取 `data.clip_url` 作为可播放地址。`is_original=true` 表示返回的是原始视频。
+
+请求字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|:-|:-|:-:|:-|
+| `video_url` | string | 是 | OSS 视频可访问 URL，必须指向当前配置的 OSS Bucket 或 `OSS_PUBLIC_BASE_URL` |
+| `wait` | boolean | 否 | 兼容字段；当前本地处理流程为同步执行 |
+
+失败响应示例：
+
+```json
+{
+  "success": false,
+  "code": "BAD_REQUEST",
+  "message": "video_url must point to the current OSS bucket",
+  "data": null
+}
+```
+
+`OSS_VIDEO_MAX_BYTES` 用于限制可下载的视频大小，默认示例值 `209715200` 表示 200MB。
+
 If you do not want to clone this repository, you can also load our models through [Transformers](https://github.com/huggingface/transformers/). Below is a simple code snippet. Please refer to the [official page](https://huggingface.co/docs/transformers/main/en/model_doc/depth_anything_v2) for more details.
 
 - Note 1: Make sure you can connect to Hugging Face and have installed the latest Transformers.

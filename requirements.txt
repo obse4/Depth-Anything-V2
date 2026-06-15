@@ -1,6 +1,12 @@
 gradio_imageslider
 gradio
+fastapi
+imageio-ffmpeg
 matplotlib
 opencv-python
+oss2
+python-dotenv
+requests
 torch
 torchvision
+uvicorn
